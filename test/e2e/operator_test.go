@@ -59,6 +59,9 @@ const (
 
 	// controllerSecretName is the name of the controller's cloud credential secret provisioned by the CI.
 	controllerSecretName = "aws-load-balancer-controller-cluster"
+
+	// awsLoadBalancerControllerContainerName is the name of the AWS load balancer controller's container.
+	awsLoadBalancerControllerContainerName = "controller"
 )
 
 var (
@@ -1199,6 +1202,112 @@ func TestAWSLoadBalancerControllerOpenAPIValidation(t *testing.T) {
 	}
 }
 
+// TestAWSLoadBalancerControllerUserTags verifies that the user-defined tags are correctly applied.
+// It verifies that the controller deployment's `--default-tags` argument is updated
+// to include the tags from both the controller spec and the infrastructure status,
+// giving precedence to the controller spec in case of key conflicts.
+func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
+	testWorkloadNamespace := "aws-load-balancer-test-user-tags"
+	t.Logf("Creating test namespace %q", testWorkloadNamespace)
+	echoNs := createTestNamespace(t, testWorkloadNamespace)
+	defer func() {
+		waitForDeletion(context.TODO(), t, kubeClient, echoNs, defaultTimeout)
+	}()
+
+	t.Log("Creating aws load balancer controller instance with default ingress class and user tags")
+
+	alb := newALBCBuilder().withRoleARNIf(stsModeRequested(), controllerRoleARN).build()
+	// add additional resource tags in alb spec
+	alb.Spec.AdditionalResourceTags = []albo.AWSResourceTag{
+		{Key: "op-key1", Value: "op-value1"},
+		{Key: "conflict-key1", Value: "op-value2"},
+		{Key: "conflict-key2", Value: "op-value3"},
+	}
+
+	if err := kubeClient.Create(context.TODO(), alb); err != nil {
+		t.Fatalf("failed to create aws load balancer controller: %v", err)
+	}
+	defer func() {
+		waitForDeletion(context.TODO(), t, kubeClient, alb, defaultTimeout)
+	}()
+
+	expected := []appsv1.DeploymentCondition{
+		{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue},
+	}
+	deploymentName := types.NamespacedName{Name: "aws-load-balancer-controller-cluster", Namespace: "aws-load-balancer-operator"}
+	if err := waitForDeploymentStatusCondition(context.TODO(), t, kubeClient, defaultTimeout, deploymentName, expected...); err != nil {
+		t.Fatalf("did not get expected available condition for deployment: %v", err)
+	}
+
+	dep := &appsv1.Deployment{}
+	if err := kubeClient.Get(context.TODO(), deploymentName, dep); err != nil {
+		t.Fatalf("failed to get deployment %s: %v", deploymentName.Name, err)
+	}
+
+	expectedTagValue := "conflict-key1=op-value2,conflict-key2=op-value3,op-key1=op-value1"
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		if c.Name == awsLoadBalancerControllerContainerName {
+			actualTagValue, err := extractDefaultTagsFromArgs(c.Args)
+			if err != nil {
+				t.Fatalf("failed to get default tags :%v", err)
+			}
+			if actualTagValue != expectedTagValue {
+				t.Fatalf("expected default-tags %s, but got %s", expectedTagValue, actualTagValue)
+			}
+		}
+	}
+
+	// Update AWS ResourceTags at infraConfig
+	infra := &configv1.Infrastructure{}
+	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		err := kubeClient.Get(context.TODO(), types.NamespacedName{Name: "cluster"}, infra)
+		if err != nil {
+			return err
+		}
+		if infra.Status.PlatformStatus == nil {
+			infra.Status.PlatformStatus = &configv1.PlatformStatus{}
+		}
+		if infra.Status.PlatformStatus.AWS == nil {
+			infra.Status.PlatformStatus.AWS = &configv1.AWSPlatformStatus{}
+		}
+
+		infra.Status.PlatformStatus.AWS.ResourceTags = []configv1.AWSResourceTag{
+			{Key: "plat-key1", Value: "plat-value1"},
+			{Key: "conflict-key1", Value: "plat-value2"},
+			{Key: "conflict-key2", Value: "plat-value3"},
+		}
+		updateErr := kubeClient.Status().Update(context.TODO(), infra)
+		return updateErr
+	})
+	if retryErr != nil {
+		t.Errorf("failed to update infrastructure status: %v", retryErr)
+	}
+
+	// wait for sometime for the deployment to restart
+	time.Sleep(15 * time.Second)
+
+	// get the updated deployment
+	if err := waitForDeploymentStatusCondition(context.TODO(), t, kubeClient, defaultTimeout, deploymentName, expected...); err != nil {
+		t.Fatalf("did not get expected available condition for deployment: %v", err)
+	}
+	if err := kubeClient.Get(context.TODO(), deploymentName, dep); err != nil {
+		t.Fatalf("failed to get deployment %s: %v", deploymentName.Name, err)
+	}
+
+	expectedTagValue = "conflict-key1=op-value2,conflict-key2=op-value3,op-key1=op-value1,plat-key1=plat-value1"
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		if c.Name == awsLoadBalancerControllerContainerName {
+			actualTagValue, err := extractDefaultTagsFromArgs(c.Args)
+			if err != nil {
+				t.Fatalf("failed to get default tags :%v", err)
+			}
+			if actualTagValue != expectedTagValue {
+				t.Fatalf("expected default-tags %s, but got %s", expectedTagValue, actualTagValue)
+			}
+		}
+	}
+}
+
 // ensureCredentialsRequest creates CredentialsRequest to provision a secret with the cloud credentials required by this e2e test.
 func ensureCredentialsRequest(secret types.NamespacedName) error {
 	providerSpec, err := cco.Codec.EncodeProviderSpec(&cco.AWSProviderSpec{
@@ -1283,4 +1392,20 @@ func stsModeRequested() bool {
 		return true
 	}
 	return false
+}
+
+// extractDefaultTagsFromArgs extracts the value of the `--default-tags` argument
+// from a list of container arguments. If the argument is not found or is empty,
+// an empty string is returned.
+func extractDefaultTagsFromArgs(args []string) (string, error) {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--default-tags=") {
+			parts := strings.SplitN(arg, "=", 2)
+			if len(parts) != 2 {
+				return "", fmt.Errorf("invalid format for --default-tags argument: %s", arg)
+			}
+			return parts[1], nil
+		}
+	}
+	return "", nil
 }
