@@ -1223,13 +1223,15 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 
 	t.Log("Creating aws load balancer controller instance with default ingress class and user tags")
 
-	alb := newALBCBuilder().withRoleARNIf(stsModeRequested(), controllerRoleARN).build()
-	// add additional resource tags in alb spec
-	alb.Spec.AdditionalResourceTags = []albo.AWSResourceTag{
-		{Key: "op-key1", Value: "op-value1"},
-		{Key: "conflict-key1", Value: "op-value2"},
-		{Key: "conflict-key2", Value: "op-value3"},
-	}
+	// create alb with additional resource tags added in alb spec
+	alb := newALBCBuilder().
+		withRoleARNIf(stsModeRequested(), controllerRoleARN).
+		withResourceTags(map[string]string{
+			"op-key1":       "op-value1",
+			"conflict-key1": "op-value2",
+			"conflict-key2": "op-value3",
+		}).
+		build()
 
 	if err := kubeClient.Create(context.TODO(), alb); err != nil {
 		t.Fatalf("failed to create aws load balancer controller: %v", err)
@@ -1457,6 +1459,9 @@ func assertContainerArgFromDeployment(t *testing.T, dep *appsv1.Deployment, cont
 	t.Fatalf("container %q not found in deployment", containerName)
 }
 
+// This logic was inspired by
+// https://github.com/openshift/origin/pull/29216/files#diff-35a89a7a7362642eebb559fb8564e857b00d6f7dd6322c3adabaf1adbd609d35R2267-R2278
+// implementation.
 func isManagedServiceCluster(ctx context.Context, adminClient kubernetes.Interface) (bool, error) {
 	_, err := adminClient.CoreV1().Namespaces().Get(ctx, "openshift-backplane", v1.GetOptions{})
 	if err == nil {

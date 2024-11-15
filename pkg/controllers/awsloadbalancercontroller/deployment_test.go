@@ -239,10 +239,7 @@ func TestDesiredArgs(t *testing.T) {
 			if tc.controller.Spec.IngressClass == "" {
 				tc.controller.Spec.IngressClass = "alb"
 			}
-			if tc.platformStatus == nil {
-				tc.platformStatus = &configv1.PlatformStatus{}
-			}
-			args, gotErr := desiredContainerArgs(tc.controller, tc.platformStatus, "test-cluster", "test-vpc")
+			args, gotErr := desiredContainerArgs(tc.controller, "test-cluster", "test-vpc", tc.platformStatus)
 			if (gotErr != nil) != tc.expectedError {
 				t.Fatalf("expected errors to be %t, but got %t", tc.expectedError, gotErr != nil)
 			}
@@ -847,11 +844,11 @@ func TestEnsureDeployment(t *testing.T) {
 				VPCID:       "test-vpc",
 				AWSRegion:   testAWSRegion,
 			}
-			_, err := r.ensureDeployment(context.Background(), tc.serviceAccount, "test-credentials", "test-serving", tc.controller, &configv1.PlatformStatus{}, tc.trustedCAConfigMap)
+			_, err := r.ensureDeployment(context.Background(), tc.serviceAccount, "test-credentials", "test-serving", tc.controller, nil, tc.trustedCAConfigMap)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			args, err := desiredContainerArgs(tc.controller, &configv1.PlatformStatus{}, "test-cluster", "test-vpc")
+			args, err := desiredContainerArgs(tc.controller, "test-cluster", "test-vpc", nil)
 			if err != nil {
 				t.Fatalf("failed to get container args: %v", err)
 			}
@@ -962,11 +959,11 @@ func TestEnsureDeploymentEnvVars(t *testing.T) {
 				VPCID:       "test-vpc",
 				AWSRegion:   testAWSRegion,
 			}
-			_, err := r.ensureDeployment(context.Background(), tc.serviceAccount, "test-credentials", "test-serving", tc.controller, &configv1.PlatformStatus{}, nil)
+			_, err := r.ensureDeployment(context.Background(), tc.serviceAccount, "test-credentials", "test-serving", tc.controller, nil, nil)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			args, err := desiredContainerArgs(tc.controller, &configv1.PlatformStatus{}, "test-cluster", "test-vpc")
+			args, err := desiredContainerArgs(tc.controller, "test-cluster", "test-vpc", nil)
 			if err != nil {
 				t.Fatalf("failed to get container args: %v", err)
 			}

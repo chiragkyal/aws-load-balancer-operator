@@ -127,7 +127,7 @@ func (r *AWSLoadBalancerControllerReconciler) ensureDeployment(ctx context.Conte
 }
 
 func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(name, credentialsRequestSecretName, servingSecret string, controller *albo.AWSLoadBalancerController, platformStatus *configv1.PlatformStatus, sa *corev1.ServiceAccount, trustedCAConfigMapName, trustedCAConfigMapHash string) (*appsv1.Deployment, error) {
-	containerArgs, err := desiredContainerArgs(controller, platformStatus, r.ClusterName, r.VPCID)
+	containerArgs, err := desiredContainerArgs(controller, r.ClusterName, r.VPCID, platformStatus)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get container args: %w", err)
 	}
@@ -270,7 +270,7 @@ func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(name, credential
 	return d, nil
 }
 
-func desiredContainerArgs(controller *albo.AWSLoadBalancerController, platformStatus *configv1.PlatformStatus, clusterName, vpcID string) ([]string, error) {
+func desiredContainerArgs(controller *albo.AWSLoadBalancerController, clusterName, vpcID string, platformStatus *configv1.PlatformStatus) ([]string, error) {
 	var args []string
 	args = append(args, fmt.Sprintf("--webhook-cert-dir=%s", webhookTLSDir))
 	args = append(args, fmt.Sprintf("--aws-vpc-id=%s", vpcID))
@@ -570,12 +570,10 @@ func mergeTags(controller *albo.AWSLoadBalancerController, platformStatus *confi
 	}
 
 	// Add tags from platformStatus.AWS.ResourceTags to the map, only if the key doesn't exist
-	if platformStatus.AWS != nil && len(platformStatus.AWS.ResourceTags) > 0 {
+	if platformStatus != nil && platformStatus.AWS != nil && len(platformStatus.AWS.ResourceTags) > 0 {
 		for _, t := range platformStatus.AWS.ResourceTags {
-			if len(t.Key) > 0 {
-				if _, exists := tagMap[t.Key]; !exists {
-					tagMap[t.Key] = t.Value
-				}
+			if _, exists := tagMap[t.Key]; !exists {
+				tagMap[t.Key] = t.Value
 			}
 		}
 	}

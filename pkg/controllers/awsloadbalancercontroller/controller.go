@@ -128,9 +128,6 @@ func (r *AWSLoadBalancerControllerReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, fmt.Errorf("failed to get infrastructure %q: %w", clusterInfrastructureName, err)
 	}
 	platformStatus := infraConfig.Status.PlatformStatus
-	if platformStatus == nil {
-		return ctrl.Result{}, fmt.Errorf("failed to determine infrastructure platform status: status.platformStatus is nil")
-	}
 
 	if err := r.ensureIngressClass(ctx, lbController); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to ensure default IngressClass for AWSLoadBalancerController %q: %v", req.Name, err)
