@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/utils/pointer"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	waf "github.com/aws/aws-sdk-go-v2/service/wafregional"
 	waftypes "github.com/aws/aws-sdk-go-v2/service/wafregional/types"
 	"github.com/aws/aws-sdk-go-v2/service/wafv2"
@@ -1254,6 +1256,37 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 	}
 	depGeneration := dep.Generation
 
+	t.Logf("Creating test workload in %q namespace", testWorkloadNamespace)
+	echoSvc := createTestWorkload(t, testWorkloadNamespace)
+
+	t.Log("Creating Ingress Resource with default ingress class")
+	ingName := types.NamespacedName{Name: "echoserver", Namespace: testWorkloadNamespace}
+	ingAnnotations := map[string]string{
+		"alb.ingress.kubernetes.io/scheme":      "internet-facing",
+		"alb.ingress.kubernetes.io/target-type": "instance",
+	}
+	echoIng := buildEchoIngress(ingName, "alb", ingAnnotations, echoSvc)
+	err = retry.OnError(defaultRetryPolicy,
+		func(err error) bool {
+			if errors.IsAlreadyExists(err) {
+				return false
+			}
+			t.Logf("retrying creation of echo ingress due to %v", err)
+			return true
+		},
+		func() error { return kubeClient.Create(context.TODO(), echoIng) })
+	if err != nil && !errors.IsAlreadyExists(err) {
+		t.Fatalf("failed to ensure echo ingress %s: %v", echoIng.Name, err)
+	}
+	defer func() {
+		waitForDeletion(context.TODO(), t, kubeClient, echoIng, defaultTimeout)
+	}()
+
+	hostname, err := getIngress(context.TODO(), t, kubeClient, defaultTimeout, ingName)
+	if err != nil {
+		t.Fatalf("did not get load balancer hostname for ingress: %v", err)
+	}
+
 	// Save a copy of the original infra Config, to revert changes before exiting.
 	originalInfra := infra.DeepCopy()
 	defer func() {
@@ -1301,9 +1334,14 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 	}
 	depGeneration = dep.Generation
 
-	// Check `--default-tags` arg for tags present in alb instance and infra status (initialInfraTags)
-	expectedTagValue := "conflict-key1=op-value2,conflict-key2=op-value3,op-key1=op-value1,plat-key1=plat-value1"
-	assertContainerArgFromDeployment(t, dep, awsLoadBalancerControllerContainerName, "--default-tags", expectedTagValue)
+	t.Logf("Testing aws tags present in alb instance and infra status (initialInfraTags)")
+	expectedTags := map[string]string{
+		"conflict-key1": "op-value2", "conflict-key2": "op-value3", "op-key1": "op-value1", "plat-key1": "plat-value1",
+	}
+	// Check `--default-tags` container argument
+	assertContainerArgFromDeployment(t, dep, awsLoadBalancerControllerContainerName, "--default-tags", convertTagsMapToString(expectedTags))
+	// Check the actual AWS ELB instance
+	assertELBTagsFromHostname(t, hostname, expectedTags)
 
 	// Update the status again, removing one tag.
 	updatedInfraTags := []configv1.AWSResourceTag{
@@ -1332,9 +1370,14 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 		t.Fatalf("failed to get deployment %s: %v", deploymentName.Name, err)
 	}
 
-	// Check `--default-tags` arg for tags present in alb instance and infra status (updatedInfraTags)
-	expectedTagValue = "conflict-key1=op-value2,conflict-key2=op-value3,op-key1=op-value1"
-	assertContainerArgFromDeployment(t, dep, awsLoadBalancerControllerContainerName, "--default-tags", expectedTagValue)
+	t.Logf("Testing aws tags present in alb instance and infra status (updatedInfraTags)")
+	expectedTags = map[string]string{
+		"conflict-key1": "op-value2", "conflict-key2": "op-value3", "op-key1": "op-value1",
+	}
+	// Check `--default-tags` container argument
+	assertContainerArgFromDeployment(t, dep, awsLoadBalancerControllerContainerName, "--default-tags", convertTagsMapToString(expectedTags))
+	// Check the actual AWS ELB instance
+	assertELBTagsFromHostname(t, hostname, expectedTags)
 }
 
 // ensureCredentialsRequest creates CredentialsRequest to provision a secret with the cloud credentials required by this e2e test.
@@ -1348,6 +1391,11 @@ func ensureCredentialsRequest(secret types.NamespacedName) error {
 			},
 			{
 				Action:   []string{"waf-regional:GetChangeToken", "waf-regional:CreateWebACL", "waf-regional:DeleteWebACL", "waf-regional:ListWebACLs"},
+				Effect:   "Allow",
+				Resource: "*",
+			},
+			{
+				Action:   []string{"elasticloadbalancing:DescribeLoadBalancers", "elasticloadbalancing:DescribeTags"},
 				Effect:   "Allow",
 				Resource: "*",
 			},
@@ -1459,6 +1507,39 @@ func assertContainerArgFromDeployment(t *testing.T, dep *appsv1.Deployment, cont
 	t.Fatalf("container %q not found in deployment", containerName)
 }
 
+// assertELBTagsFromHostname asserts that an ELB instance with given hostname has the expected tags.
+func assertELBTagsFromHostname(t *testing.T, hostname string, expectedTags map[string]string) {
+	t.Helper()
+	t.Logf("Asserting ELB with host name %q has tags %v", hostname, expectedTags)
+
+	elbClient := elasticloadbalancingv2.NewFromConfig(cfg)
+
+	err := wait.PollUntilContextTimeout(context.Background(), 10*time.Second, defaultTimeout, false, func(ctx context.Context) (bool, error) {
+		gotELBTags, err := getELBTagsFromHostName(t, elbClient, hostname)
+		if err != nil {
+			return false, fmt.Errorf("unable to get ELB tags for %s hostname: %v", hostname, err)
+		}
+
+		for expKey, expValue := range expectedTags {
+			gotValue, exists := gotELBTags[expKey]
+			if !exists {
+				t.Logf("Tag %q not yet present on %s, retrying...", expKey, hostname)
+				return false, nil
+			}
+			if expValue != gotValue {
+				t.Logf("Tag %q value mismatch on %s (expected: %q, got: %q), retrying...", expKey, hostname, expValue, gotValue)
+				return false, nil
+			}
+		}
+
+		return true, nil
+	})
+
+	if err != nil {
+		t.Fatalf("Timed out waiting for tags to match on %s: %v", hostname, err)
+	}
+}
+
 // This logic was inspired by
 // https://github.com/openshift/origin/pull/29216/files#diff-35a89a7a7362642eebb559fb8564e857b00d6f7dd6322c3adabaf1adbd609d35R2267-R2278
 // implementation.
@@ -1473,4 +1554,19 @@ func isManagedServiceCluster(ctx context.Context, adminClient kubernetes.Interfa
 	}
 
 	return false, nil
+}
+
+// convertTagsMapToString converts a map of tags into a sorted comma-separated string.
+// Eeach key-value pair is formatted as "key=value".
+func convertTagsMapToString(tagsMap map[string]string) string {
+	if len(tagsMap) == 0 {
+		return ""
+	}
+	var tags []string
+	for key, value := range tagsMap {
+		tags = append(tags, fmt.Sprintf("%s=%s", key, value))
+	}
+
+	sort.Strings(tags)
+	return strings.Join(tags, ",")
 }
