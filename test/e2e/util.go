@@ -536,21 +536,21 @@ func mustGetEnv(name string) string {
 // the given update function to the current Infrastructure object.
 // If there is a conflict error on update then the complete operation
 // is retried until timeout is reached.
-func updateInfrastructureConfigStatusWithRetryOnConflict(t *testing.T, timeout time.Duration, kubeClient client.Client, updateFunc func(*configv1.Infrastructure) *configv1.Infrastructure) error {
+func updateInfrastructureConfigStatusWithRetryOnConflict(t *testing.T, timeout time.Duration, kubeClient client.Client, updateFunc func(configv1.Infrastructure) configv1.Infrastructure) error {
 	t.Helper()
 
 	t.Log("Updating 'cluster' infrastructure config status")
 	return wait.PollUntilContextTimeout(context.Background(), 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		infra := &configv1.Infrastructure{}
-		if err := kubeClient.Get(context.TODO(), types.NamespacedName{Name: "cluster"}, infra); err != nil {
+		var infra configv1.Infrastructure
+		if err := kubeClient.Get(context.TODO(), types.NamespacedName{Name: "cluster"}, &infra); err != nil {
 			t.Logf("error getting 'cluster' infrastructure config: %v, retrying...", err)
 			return false, nil
 		}
 
 		// Apply the update function to the Infrastructure object.
-		updatedInfra := updateFunc(infra.DeepCopy())
+		updatedInfra := updateFunc(infra)
 
-		if err := kubeClient.Status().Update(context.TODO(), updatedInfra); err != nil {
+		if err := kubeClient.Status().Update(context.TODO(), &updatedInfra); err != nil {
 			if errors.IsConflict(err) {
 				t.Logf("conflict when updating 'cluster' infrastructure config: %v, retrying...", err)
 				return false, nil

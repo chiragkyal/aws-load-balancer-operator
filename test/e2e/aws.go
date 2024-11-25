@@ -6,7 +6,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -17,7 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	"github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi"
+	rgtTpye "github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -45,53 +45,35 @@ func awsConfigWithCredentials(ctx context.Context, kubeClient client.Client, aws
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(keyID, secretKey, "")))
 }
 
-// getELBTagsFromHostName retrieves the tags associated with an Elastic Load Balancer given its hostname.
-// It first finds the ARN of the load balancer matching the hostname and then retrieves its tags.
-func getELBTagsFromHostName(t *testing.T, elbClient *elasticloadbalancingv2.Client, hostname string) (map[string]string, error) {
-	loadBalancerArn, err := getELBARNFromHostname(t, elbClient, hostname)
-	if err != nil {
-		return nil, err
+// getLoadBalancerARNsByTags retrieves the ARNs of Elastic Load Balancers that match the specified tags.
+// It uses the Resource Groups Tagging API to filter load balancers based on tag criteria.
+func getLoadBalancerARNsByTags(ctx context.Context, rgtClient *resourcegroupstaggingapi.Client, tags map[string]string) ([]string, error) {
+	var tagFilters []rgtTpye.TagFilter
+	for key, value := range tags {
+		tagFilters = append(tagFilters, rgtTpye.TagFilter{
+			Key:    aws.String(key),
+			Values: []string{value},
+		})
 	}
 
-	result, err := elbClient.DescribeTags(context.TODO(), &elasticloadbalancingv2.DescribeTagsInput{
-		ResourceArns: []string{loadBalancerArn},
-	})
-	if err != nil {
-		return nil, err
+	input := &resourcegroupstaggingapi.GetResourcesInput{
+		ResourceTypeFilters: []string{"elasticloadbalancing:loadbalancer"},
+		TagFilters:          tagFilters,
 	}
 
-	tags := make(map[string]string)
-	if len(result.TagDescriptions) > 0 {
-		for _, tagDesc := range result.TagDescriptions {
-			for _, tag := range tagDesc.Tags {
-				tags[*tag.Key] = *tag.Value
-			}
+	var arns []string
+	paginator := resourcegroupstaggingapi.NewGetResourcesPaginator(rgtClient, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed getting resources page: %w", err)
 		}
-	}
-	t.Logf("Tags present on %s load balancer: %v", loadBalancerArn, tags)
-	return tags, nil
-}
 
-// getELBARNFromHostname retrieves the ARN of an Elastic Load Balancer given its hostname.
-// It queries all load balancers and find the one matching the given hostname.
-func getELBARNFromHostname(t *testing.T, elbClient *elasticloadbalancingv2.Client, hostname string) (string, error) {
-	result, err := elbClient.DescribeLoadBalancers(context.TODO(), &elasticloadbalancingv2.DescribeLoadBalancersInput{})
-	if err != nil {
-		return "", err
-	}
-
-	var loadBalancerArn string
-	for _, lb := range result.LoadBalancers {
-		if *lb.DNSName == hostname {
-			loadBalancerArn = *lb.LoadBalancerArn
-			t.Logf("LoadBalancer ARN: %s", loadBalancerArn)
-			break
+		for _, resource := range page.ResourceTagMappingList {
+			arns = append(arns, *resource.ResourceARN)
 		}
+
 	}
 
-	if len(loadBalancerArn) > 0 {
-		return loadBalancerArn, nil
-	}
-
-	return "", fmt.Errorf("no load balancer found with hostname: %s", hostname)
+	return arns, nil
 }
