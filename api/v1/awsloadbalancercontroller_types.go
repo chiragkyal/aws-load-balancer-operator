@@ -64,10 +64,12 @@ type AWSLoadBalancerControllerSpec struct {
 	// will be propagated to the AWS resources. The controller owns all the tags of the managed AWS resources,
 	// unsolicited tags are removed. The controller doesn't watch for changes on AWS, so the removal of the unsolicited
 	// tags can only be triggered by an event coming from OpenShift. AWS supports a maximum of 50 tags per resource.
-	// AWSLoadBalancerController reserves 3 tags for its use, the rest is split between the tag annotation
-	// which can be set on the ingress and this field: 23 and 24, respectively. Each tag key must be unique.
+	// AWSLoadBalancerController reserves 3 tags for its use, OpenShift InfrastructureStatus reserves 25 tags,
+	// the rest is split between the tag annotation which can be set on the ingress and this field: 11 and 11,
+	// respectively. Each tag key must be unique. Tags from this field take precedence over those in InfrastructureStatus
+	// if a tag key conflicts.
 	//
-	// +kubebuilder:validation:MaxItems=24
+	// +kubebuilder:validation:MaxItems=11
 	// +kubebuilder:validation:Optional
 	// +optional
 	// +listType=map

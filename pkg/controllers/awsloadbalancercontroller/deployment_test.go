@@ -34,7 +34,6 @@ func TestDesiredArgs(t *testing.T) {
 		controller     *albo.AWSLoadBalancerController
 		platformStatus *configv1.PlatformStatus
 		expectedArgs   sets.Set[string]
-		expectedError  bool
 	}{
 		{
 			name: "non-default ingress class",
@@ -210,21 +209,6 @@ func TestDesiredArgs(t *testing.T) {
 				"--default-tags=op-key1=op-value1,op-key2=op-value2,plat-key1=plat-value1,plat-key2=plat-value2",
 			),
 		},
-		{
-			name: "when merged tags exceeded maximum of 24 allowed tags",
-			controller: &albo.AWSLoadBalancerController{
-				Spec: albo.AWSLoadBalancerControllerSpec{
-					AdditionalResourceTags: []albo.AWSResourceTag{},
-				},
-			},
-			platformStatus: &configv1.PlatformStatus{
-				Type: configv1.AWSPlatformType,
-				AWS: &configv1.AWSPlatformStatus{
-					ResourceTags: generateAWSResourceTags(25),
-				},
-			},
-			expectedError: true,
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defaultArgs := sets.New[string](
@@ -239,16 +223,12 @@ func TestDesiredArgs(t *testing.T) {
 			if tc.controller.Spec.IngressClass == "" {
 				tc.controller.Spec.IngressClass = "alb"
 			}
-			args, gotErr := desiredContainerArgs(tc.controller, "test-cluster", "test-vpc", tc.platformStatus)
-			if (gotErr != nil) != tc.expectedError {
-				t.Fatalf("expected errors to be %t, but got %t", tc.expectedError, gotErr != nil)
-			}
-			if !tc.expectedError {
-				expected := sets.List(expectedArgs)
-				sort.Strings(expected)
-				if diff := cmp.Diff(expected, args); diff != "" {
-					t.Fatalf("unexpected arguments\n%s", diff)
-				}
+			args := desiredContainerArgs(tc.controller, "test-cluster", "test-vpc", tc.platformStatus)
+
+			expected := sets.List(expectedArgs)
+			sort.Strings(expected)
+			if diff := cmp.Diff(expected, args); diff != "" {
+				t.Fatalf("unexpected arguments\n%s", diff)
 			}
 		})
 	}
@@ -848,11 +828,7 @@ func TestEnsureDeployment(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			args, err := desiredContainerArgs(tc.controller, "test-cluster", "test-vpc", nil)
-			if err != nil {
-				t.Fatalf("failed to get container args: %v", err)
-			}
-			tc.expectedDeployment.Spec.Template.Spec.Containers[0].Args = args
+			tc.expectedDeployment.Spec.Template.Spec.Containers[0].Args = desiredContainerArgs(tc.controller, "test-cluster", "test-vpc", nil)
 			var deployment appsv1.Deployment
 			err = client.Get(context.Background(), types.NamespacedName{Namespace: "test-namespace", Name: fmt.Sprintf("%s-%s", controllerResourcePrefix, tc.controller.Name)}, &deployment)
 			if err != nil {
@@ -963,11 +939,7 @@ func TestEnsureDeploymentEnvVars(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			args, err := desiredContainerArgs(tc.controller, "test-cluster", "test-vpc", nil)
-			if err != nil {
-				t.Fatalf("failed to get container args: %v", err)
-			}
-			tc.expectedDeployment.Spec.Template.Spec.Containers[0].Args = args
+			tc.expectedDeployment.Spec.Template.Spec.Containers[0].Args = desiredContainerArgs(tc.controller, "test-cluster", "test-vpc", nil)
 			var deployment appsv1.Deployment
 			err = client.Get(context.Background(), types.NamespacedName{Namespace: "test-namespace", Name: fmt.Sprintf("%s-%s", controllerResourcePrefix, tc.controller.Name)}, &deployment)
 			if err != nil {
@@ -1341,16 +1313,4 @@ func (b *testContainerBuilder) build() corev1.Container {
 		VolumeMounts:    b.volumeMounts,
 		SecurityContext: b.securityContext,
 	}
-}
-
-// generateAWSResourceTags generates AWSResourceTags with a length of `n`.
-func generateAWSResourceTags(n int) []configv1.AWSResourceTag {
-	tags := make([]configv1.AWSResourceTag, n)
-	for i := 0; i < n; i++ {
-		tags[i] = configv1.AWSResourceTag{
-			Key:   fmt.Sprintf("key-%d", i),
-			Value: fmt.Sprintf("value-%d", i),
-		}
-	}
-	return tags
 }

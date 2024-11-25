@@ -92,10 +92,7 @@ func (r *AWSLoadBalancerControllerReconciler) ensureDeployment(ctx context.Conte
 		trustCAConfigMapHash = configMapHash
 	}
 
-	desired, err := r.desiredDeployment(deploymentName, crSecretName, servingSecretName, controller, platformStatus, sa, trustCAConfigMapName, trustCAConfigMapHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get desired deployment %s: %w", deploymentName, err)
-	}
+	desired := r.desiredDeployment(deploymentName, crSecretName, servingSecretName, controller, platformStatus, sa, trustCAConfigMapName, trustCAConfigMapHash)
 
 	err = controllerutil.SetControllerReference(controller, desired, r.Scheme)
 	if err != nil {
@@ -126,11 +123,7 @@ func (r *AWSLoadBalancerControllerReconciler) ensureDeployment(ctx context.Conte
 	return current, nil
 }
 
-func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(name, credentialsRequestSecretName, servingSecret string, controller *albo.AWSLoadBalancerController, platformStatus *configv1.PlatformStatus, sa *corev1.ServiceAccount, trustedCAConfigMapName, trustedCAConfigMapHash string) (*appsv1.Deployment, error) {
-	containerArgs, err := desiredContainerArgs(controller, r.ClusterName, r.VPCID, platformStatus)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get container args: %w", err)
-	}
+func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(name, credentialsRequestSecretName, servingSecret string, controller *albo.AWSLoadBalancerController, platformStatus *configv1.PlatformStatus, sa *corev1.ServiceAccount, trustedCAConfigMapName, trustedCAConfigMapHash string) *appsv1.Deployment {
 	d := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -155,7 +148,7 @@ func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(name, credential
 						{
 							Name:  awsLoadBalancerControllerContainerName,
 							Image: r.Image,
-							Args:  containerArgs,
+							Args:  desiredContainerArgs(controller, r.ClusterName, r.VPCID, platformStatus),
 							Env: append([]corev1.EnvVar{
 								{
 									Name:  awsRegionEnvVarName,
@@ -267,22 +260,16 @@ func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(name, credential
 			})
 		}
 	}
-	return d, nil
+	return d
 }
 
-func desiredContainerArgs(controller *albo.AWSLoadBalancerController, clusterName, vpcID string, platformStatus *configv1.PlatformStatus) ([]string, error) {
+func desiredContainerArgs(controller *albo.AWSLoadBalancerController, clusterName, vpcID string, platformStatus *configv1.PlatformStatus) []string {
 	var args []string
 	args = append(args, fmt.Sprintf("--webhook-cert-dir=%s", webhookTLSDir))
 	args = append(args, fmt.Sprintf("--aws-vpc-id=%s", vpcID))
 	args = append(args, fmt.Sprintf("--cluster-name=%s", clusterName))
 
 	tags := mergeTags(controller, platformStatus)
-	// `--default-tags` arg allows a maximum of 24 user tags, but the combination of
-	// controller.Spec.AdditionalResourceTags and platformStatus.AWS.ResourceTags can result in more.
-	// Ensure a maximum of 24 merged tags are added.
-	if len(tags) > 24 {
-		return nil, fmt.Errorf("exceeded maximum of 24 allowed tags, got %d", len(tags))
-	}
 	if len(tags) > 0 {
 		sort.Strings(tags)
 		args = append(args, fmt.Sprintf(`--default-tags=%s`, strings.Join(tags, ",")))
@@ -314,7 +301,7 @@ func desiredContainerArgs(controller *albo.AWSLoadBalancerController, clusterNam
 	args = append(args, fmt.Sprintf("--ingress-class=%s", controller.Spec.IngressClass))
 	args = append(args, "--feature-gates=EnableIPTargetType=false")
 	sort.Strings(args)
-	return args, nil
+	return args
 }
 
 func (r *AWSLoadBalancerControllerReconciler) currentDeployment(ctx context.Context, name string, namespace string) (bool, *appsv1.Deployment, error) {
