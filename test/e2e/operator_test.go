@@ -1394,7 +1394,7 @@ func ensureCredentialsRequest(secret types.NamespacedName) error {
 			{
 				Action:   []string{"tag:GetResources"},
 				Effect:   "Allow",
-				Resource: "arn:aws:elasticloadbalancing:*:*:loadbalancer/*",
+				Resource: "*",
 			},
 		},
 	})
