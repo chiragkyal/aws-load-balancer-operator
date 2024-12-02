@@ -1290,9 +1290,8 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 	// Save a copy of the original infra Config, to revert changes before exiting.
 	originalInfra := infra.DeepCopy()
 	defer func() {
-		if err := updateInfrastructureConfigStatusWithRetryOnConflict(t, 5*time.Minute, kubeClient, func(infra configv1.Infrastructure) configv1.Infrastructure {
+		if err := updateInfrastructureConfigStatusWithRetryOnConflict(t, 5*time.Minute, kubeClient, func(infra *configv1.Infrastructure) {
 			infra.Status = originalInfra.Status
-			return infra
 		}); err != nil {
 			t.Fatalf("Unable to revert the infrastructure changes: %v", err)
 		}
@@ -1305,7 +1304,7 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 		{Key: "conflict-key2", Value: "plat-value3"},
 	}
 	t.Logf("Updating cluster infrastructure config with resource tags: %v", initialInfraTags)
-	err = updateInfrastructureConfigStatusWithRetryOnConflict(t, 5*time.Minute, kubeClient, func(infra configv1.Infrastructure) configv1.Infrastructure {
+	err = updateInfrastructureConfigStatusWithRetryOnConflict(t, 5*time.Minute, kubeClient, func(infra *configv1.Infrastructure) {
 		if infra.Status.PlatformStatus == nil {
 			infra.Status.PlatformStatus = &configv1.PlatformStatus{}
 		}
@@ -1313,7 +1312,6 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 			infra.Status.PlatformStatus.AWS = &configv1.AWSPlatformStatus{}
 		}
 		infra.Status.PlatformStatus.AWS.ResourceTags = initialInfraTags
-		return infra
 	})
 	if err != nil {
 		t.Errorf("failed to update infrastructure status: %v", err)
@@ -1340,7 +1338,7 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 	// Check `--default-tags` container argument
 	assertContainerArgFromDeployment(t, dep, awsLoadBalancerControllerContainerName, "--default-tags", convertTagsMapToString(expectedTags))
 	// Check the actual AWS ELB instance
-	assertELBbyTags(t, expectedTags)
+	assertELBbyTags(t, expectedTags, []string{})
 
 	// Update the status again, removing one tag.
 	updatedInfraTags := []configv1.AWSResourceTag{
@@ -1348,9 +1346,8 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 		{Key: "conflict-key2", Value: "plat-value3"},
 	}
 	t.Logf("Updating AWS ResourceTags in the cluster infrastructure config: %v", updatedInfraTags)
-	err = updateInfrastructureConfigStatusWithRetryOnConflict(t, 5*time.Minute, kubeClient, func(infra configv1.Infrastructure) configv1.Infrastructure {
+	err = updateInfrastructureConfigStatusWithRetryOnConflict(t, 5*time.Minute, kubeClient, func(infra *configv1.Infrastructure) {
 		infra.Status.PlatformStatus.AWS.ResourceTags = updatedInfraTags
-		return infra
 	})
 	if err != nil {
 		t.Errorf("failed to update infrastructure status: %v", err)
@@ -1373,10 +1370,11 @@ func TestAWSLoadBalancerControllerUserTags(t *testing.T) {
 	expectedTags = map[string]string{
 		"conflict-key1": "op-value2", "conflict-key2": "op-value3", "op-key1": "op-value1",
 	}
+	expectedAbsentTags := []string{"plat-key1"}
 	// Check `--default-tags` container argument
 	assertContainerArgFromDeployment(t, dep, awsLoadBalancerControllerContainerName, "--default-tags", convertTagsMapToString(expectedTags))
 	// Check the actual AWS ELB instance
-	assertELBbyTags(t, expectedTags)
+	assertELBbyTags(t, expectedTags, expectedAbsentTags)
 }
 
 // ensureCredentialsRequest creates CredentialsRequest to provision a secret with the cloud credentials required by this e2e test.
@@ -1396,7 +1394,7 @@ func ensureCredentialsRequest(secret types.NamespacedName) error {
 			{
 				Action:   []string{"tag:GetResources"},
 				Effect:   "Allow",
-				Resource: "*",
+				Resource: "arn:aws:elasticloadbalancing:*:*:loadbalancer/*",
 			},
 		},
 	})
@@ -1477,12 +1475,12 @@ func extractArg(args []string, argKey string) (string, error) {
 		if strings.HasPrefix(arg, argKey+"=") {
 			parts := strings.SplitN(arg, "=", 2)
 			if len(parts) != 2 {
-				return "", fmt.Errorf("invalid format for argument %s: %s", argKey, arg)
+				return "", fmt.Errorf("invalid format for argument %q: %q", argKey, arg)
 			}
 			return parts[1], nil
 		}
 	}
-	return "", fmt.Errorf("argument %s not found", argKey)
+	return "", fmt.Errorf("argument %q not found", argKey)
 }
 
 // assertContainerArgFromDeployment asserts that a container in a deployment has a
@@ -1506,30 +1504,40 @@ func assertContainerArgFromDeployment(t *testing.T, dep *appsv1.Deployment, cont
 	t.Fatalf("container %q not found in deployment", containerName)
 }
 
-// assertELBbyTags asserts that an ELB instance has the expected tags.
-func assertELBbyTags(t *testing.T, expectedTags map[string]string) {
+// assertELBbyTags asserts that an ELB instance has the expected tags and doesn't have the expected absent tags
+func assertELBbyTags(t *testing.T, expectedTags map[string]string, expectedAbsentTags []string) {
 	t.Helper()
 	t.Logf("Asserting ELBs by tags %v", expectedTags)
 
 	rgtClient := resourcegroupstaggingapi.NewFromConfig(cfg)
 
 	err := wait.PollUntilContextTimeout(context.Background(), 30*time.Second, 5*time.Minute, false, func(ctx context.Context) (bool, error) {
-		lbARNs, err := getLoadBalancerARNsByTags(ctx, rgtClient, expectedTags)
+		lbARNsAndTags, err := getLoadBalancerARNsByTags(ctx, rgtClient, expectedTags)
 		if err != nil {
 			return false, fmt.Errorf("unable to get ELBs for %v tags: %v", expectedTags, err)
 		}
 		// There must be exactly 1 ELB with the given tags
-		if len(lbARNs) != 1 {
-			t.Logf("expected single ELB with %v tags, but got %d (with arns: %v), retrying... ", expectedTags, len(lbARNs), lbARNs)
+		if len(lbARNsAndTags) != 1 {
+			t.Logf("expected single ELB with %v tags, but got %d (with arns and tags: %v), retrying... ", expectedTags, len(lbARNsAndTags), lbARNsAndTags)
 			return false, nil
 		}
 
-		t.Logf("found ELB with %v tags (with arn: %v)", expectedTags, lbARNs[0])
+		// expectedAbsentTags must not exist
+		for _, absentTagKey := range expectedAbsentTags {
+			for arn, tags := range lbARNsAndTags {
+				if _, exists := tags[absentTagKey]; exists {
+					t.Logf("found unexpected tag %s on ELB %s (with tags: %v), retrying...", absentTagKey, arn, tags)
+					return false, nil
+				}
+			}
+		}
+
+		t.Logf("found ELB with %v tags (with arn and tags: %v)", expectedTags, lbARNsAndTags)
 		return true, nil
 	})
 
 	if err != nil {
-		t.Fatalf("Timed out waiting for %v tags to match an ELB: %v", expectedTags, err)
+		t.Fatalf("timed out waiting for %v tags to match an ELB: %v", expectedTags, err)
 	}
 }
 
@@ -1552,9 +1560,6 @@ func isManagedServiceCluster(ctx context.Context, adminClient kubernetes.Interfa
 // convertTagsMapToString converts a map of tags into a sorted comma-separated string.
 // Eeach key-value pair is formatted as "key=value".
 func convertTagsMapToString(tagsMap map[string]string) string {
-	if len(tagsMap) == 0 {
-		return ""
-	}
 	var tags []string
 	for key, value := range tagsMap {
 		tags = append(tags, fmt.Sprintf("%s=%s", key, value))

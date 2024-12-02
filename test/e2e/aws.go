@@ -21,6 +21,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// arnToTagsMap maps ARNs to formatted tags.
+type arnToTagsMap map[string]map[string]string
+
 // awsConfigWithCredentials returns the default AWS config with the given region and static credentials.
 func awsConfigWithCredentials(ctx context.Context, kubeClient client.Client, awsRegion string, secretName types.NamespacedName) (aws.Config, error) {
 	secret := &corev1.Secret{}
@@ -45,9 +48,9 @@ func awsConfigWithCredentials(ctx context.Context, kubeClient client.Client, aws
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(keyID, secretKey, "")))
 }
 
-// getLoadBalancerARNsByTags retrieves the ARNs of Elastic Load Balancers that match the specified tags.
+// getLoadBalancerARNsByTags retrieves the ARNs and Tags of Elastic Load Balancers that match the specified tags.
 // It uses the Resource Groups Tagging API to filter load balancers based on tag criteria.
-func getLoadBalancerARNsByTags(ctx context.Context, rgtClient *resourcegroupstaggingapi.Client, tags map[string]string) ([]string, error) {
+func getLoadBalancerARNsByTags(ctx context.Context, rgtClient *resourcegroupstaggingapi.Client, tags map[string]string) (arnToTagsMap, error) {
 	var tagFilters []rgtTpye.TagFilter
 	for key, value := range tags {
 		tagFilters = append(tagFilters, rgtTpye.TagFilter{
@@ -61,7 +64,7 @@ func getLoadBalancerARNsByTags(ctx context.Context, rgtClient *resourcegroupstag
 		TagFilters:          tagFilters,
 	}
 
-	var arns []string
+	arnsAndTags := make(arnToTagsMap)
 	paginator := resourcegroupstaggingapi.NewGetResourcesPaginator(rgtClient, input)
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
@@ -70,10 +73,15 @@ func getLoadBalancerARNsByTags(ctx context.Context, rgtClient *resourcegroupstag
 		}
 
 		for _, resource := range page.ResourceTagMappingList {
-			arns = append(arns, *resource.ResourceARN)
+			formattedTags := make(map[string]string)
+			for _, tag := range resource.Tags {
+				formattedTags[*tag.Key] = *tag.Value
+			}
+
+			arnsAndTags[*resource.ResourceARN] = formattedTags
 		}
 
 	}
 
-	return arns, nil
+	return arnsAndTags, nil
 }
