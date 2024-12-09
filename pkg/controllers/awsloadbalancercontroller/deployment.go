@@ -69,6 +69,9 @@ const (
 	defaultCABundleKey = "ca-bundle.crt"
 	// all capabilities in the pod security context
 	allCapabilities = "ALL"
+	// Maximum number of combined tags allowed from
+	// infrastructure.status.platformStatus.aws.resourceTags and AWSLoadBalancerController.spec.additionalResourceTags.
+	maxAllowedTags = 25
 )
 
 func (r *AWSLoadBalancerControllerReconciler) ensureDeployment(ctx context.Context, sa *corev1.ServiceAccount, crSecretName, servingSecretName string, controller *albo.AWSLoadBalancerController, platformStatus *configv1.PlatformStatus, trustCAConfigMap *corev1.ConfigMap) (*appsv1.Deployment, error) {
@@ -92,7 +95,7 @@ func (r *AWSLoadBalancerControllerReconciler) ensureDeployment(ctx context.Conte
 		trustCAConfigMapHash = configMapHash
 	}
 
-	desired := r.desiredDeployment(deploymentName, crSecretName, servingSecretName, controller, platformStatus, sa, trustCAConfigMapName, trustCAConfigMapHash)
+	desired := r.desiredDeployment(ctx, deploymentName, crSecretName, servingSecretName, controller, platformStatus, sa, trustCAConfigMapName, trustCAConfigMapHash)
 
 	err = controllerutil.SetControllerReference(controller, desired, r.Scheme)
 	if err != nil {
@@ -123,7 +126,7 @@ func (r *AWSLoadBalancerControllerReconciler) ensureDeployment(ctx context.Conte
 	return current, nil
 }
 
-func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(name, credentialsRequestSecretName, servingSecret string, controller *albo.AWSLoadBalancerController, platformStatus *configv1.PlatformStatus, sa *corev1.ServiceAccount, trustedCAConfigMapName, trustedCAConfigMapHash string) *appsv1.Deployment {
+func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(ctx context.Context, name, credentialsRequestSecretName, servingSecret string, controller *albo.AWSLoadBalancerController, platformStatus *configv1.PlatformStatus, sa *corev1.ServiceAccount, trustedCAConfigMapName, trustedCAConfigMapHash string) *appsv1.Deployment {
 	d := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -148,7 +151,7 @@ func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(name, credential
 						{
 							Name:  awsLoadBalancerControllerContainerName,
 							Image: r.Image,
-							Args:  desiredContainerArgs(controller, r.ClusterName, r.VPCID, platformStatus),
+							Args:  desiredContainerArgs(ctx, controller, r.ClusterName, r.VPCID, platformStatus),
 							Env: append([]corev1.EnvVar{
 								{
 									Name:  awsRegionEnvVarName,
@@ -263,7 +266,7 @@ func (r *AWSLoadBalancerControllerReconciler) desiredDeployment(name, credential
 	return d
 }
 
-func desiredContainerArgs(controller *albo.AWSLoadBalancerController, clusterName, vpcID string, platformStatus *configv1.PlatformStatus) []string {
+func desiredContainerArgs(ctx context.Context, controller *albo.AWSLoadBalancerController, clusterName, vpcID string, platformStatus *configv1.PlatformStatus) []string {
 	var args []string
 	args = append(args, fmt.Sprintf("--webhook-cert-dir=%s", webhookTLSDir))
 	args = append(args, fmt.Sprintf("--aws-vpc-id=%s", vpcID))
@@ -271,8 +274,15 @@ func desiredContainerArgs(controller *albo.AWSLoadBalancerController, clusterNam
 
 	tags := mergeTags(controller, platformStatus)
 	if len(tags) > 0 {
-		sort.Strings(tags)
-		args = append(args, fmt.Sprintf(`--default-tags=%s`, strings.Join(tags, ",")))
+		// users should not be allowed to set more than 25 tags
+		// otherwise drop all the logs
+		if len(tags) > maxAllowedTags {
+			err := fmt.Errorf("combined Infrastructure and AdditionalResourceTags exceed the maximum tag limit: %d", maxAllowedTags)
+			log.FromContext(ctx).Error(err, "Max tag limit exceeded. Modify your configuration to include the desired tags.")
+		} else {
+			sort.Strings(tags)
+			args = append(args, fmt.Sprintf(`--default-tags=%s`, strings.Join(tags, ",")))
+		}
 	}
 	args = append(args, "--disable-ingress-class-annotation")
 	args = append(args, "--disable-ingress-group-name-annotation")

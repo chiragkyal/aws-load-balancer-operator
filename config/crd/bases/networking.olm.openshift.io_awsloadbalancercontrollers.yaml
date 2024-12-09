@@ -48,11 +48,9 @@ spec:
                   so the removal of the unsolicited tags can only be triggered by
                   an event coming from OpenShift. AWS supports a maximum of 50 tags
                   per resource. AWSLoadBalancerController reserves 3 tags for its
-                  use, OpenShift InfrastructureStatus reserves 25 tags, the rest is
-                  split between the tag annotation which can be set on the ingress
-                  and this field: 11 and 11, respectively. Each tag key must be unique.
-                  Tags from this field take precedence over those in InfrastructureStatus
-                  if a tag key conflicts.'
+                  use, the rest is split between the tag annotation which can be set
+                  on the ingress and this field: 23 and 24, respectively. Each tag
+                  key must be unique.'
                 items:
                   description: AWSResourceTag is a tag to apply to AWS resources created
                     by the controller.
@@ -74,7 +72,7 @@ spec:
                   - key
                   - value
                   type: object
-                maxItems: 11
+                maxItems: 24
                 type: array
                 x-kubernetes-list-map-keys:
                 - key
